@@ -1,52 +1,89 @@
-import base64
-from itertools import chain
-from pprint import pprint
+#该代码相较以前需要用户手动输入验证码（验证码图片会由默认图片查看器自动弹出）。
+#Windows 用户：os.startfile(tmp_path) 会直接弹出图片查看器，很方便。此处做了适配。
+#如果你是 Linux/Mac：改成 subprocess.call(['open', tmp_path]) (Mac)
+#或 subprocess.call(['xdg-open', tmp_path]) (Linux)
+#需要 import subprocess
 
-import ddddocr
+#原作者的代码现在直接运行会报错，是因为现在大家使用的 Pillow（PIL 的现代 fork）版本是 10.0.0 或更高，从 Pillow 10.0.0 开始，Image.ANTIALIAS 这个常量被彻底移除（之前在 9.x 版本中已标记为弃用）。
+#从 traceback 看，错误发生在验证码识别（OCR）过程中，脚本使用了 base64.b64decode 处理验证码图片，然后调用 OCR 的 classification 方法，使用了 ddddocr，而旧版本的 ddddocr 还在代码里硬编码了 Image.ANTIALIAS。
+#此处删除了自动识别以防止不兼容问题再次发生。
+
+import base64
+import os
+import tempfile
 import html2text
 import requests
+from itertools import chain
+from pprint import pprint
+from io import BytesIO
+from PIL import Image  # 用于打开和保存图片
 
 Headers = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "SignCheck": "935465b771e207fd0f22f5c49ec70381",
     "TimeDate": "1694747726000",
-    # 这里的TimeDate 和 SignCheck 是时间戳和加密后的token
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/111.0.0.0 Safari/537.36",
+                  "Chrome/111.0.0.0 Safari/537.36",
 }
 
 
-def get_captcha() -> dict:  # 获取验证码信息
+def get_captcha() -> dict:
+    """获取验证码信息"""
     captcha_headers = {
-        "User-Agent": "Mozilla/5.0(WindowsNT10.0;Win64;x64)AppleWebKit/537.36(KHTML,likeGecko)Chrome/98.0.4758.102Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/98.0.4758.102 Safari/537.36",
     }
     captcha = requests.get(
         "https://centro.zjlll.net/ajax?&service=/centro/api/authcode/create&params=",
         headers=captcha_headers,
     ).json()["data"]
-    #    img_bytes = base64.b64de(b64_img)
-    #   with open("test.jpg", 'wb') as f:
-    #         f.write(img_bytes)
     return captcha
 
 
 class ZJOOC:
     def __init__(self, username="", pwd=""):
-        # user = requests.session() session 实例化后可以不用一直填写 Header 和 cookies 太懒了不想改了
         self.session = requests.Session()
         self.session.verify = False
         self._batch_dict = dict()
         self.login(username, pwd)
-        self.coursemsg
+        self.coursemsg  # 触发一次获取课程信息
 
     def login(self, username="", pwd="") -> None:
         login_res: dict = {}
         while True:
             captcha_data = get_captcha()
-            captcha_id = captcha_data["id"]  # 验证码ID
-            ocr = ddddocr.DdddOcr()
-            captcha_code = ocr.classification(base64.b64decode((captcha_data["image"])))
-            pprint(f"captcha_code: {captcha_code}")
+            captcha_id = captcha_data["id"]
+
+            # === 手动输入验证码部分开始 ===
+            img_bytes = base64.b64decode(captcha_data["image"])
+            img = Image.open(BytesIO(img_bytes))
+
+            # 保存到临时文件并用系统默认程序打开图片（Windows 会自动弹出照片查看器）
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            img.save(tmp_file.name)
+            tmp_path = tmp_file.name
+            tmp_file.close()
+
+            try:
+                os.startfile(tmp_path)  # Windows 专用
+            except AttributeError:
+                # Linux / macOS 备用方式
+                import subprocess
+                if os.name == "posix":
+                    if sys.platform == "darwin":  # macOS
+                        subprocess.call(["open", tmp_path])
+                    else:  # Linux
+                        subprocess.call(["xdg-open", tmp_path])
+
+            captcha_code = input("请查看弹出的验证码图片，输入验证码后按回车: ").strip()
+
+            # 清理临时文件
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
+            # === 手动输入验证码部分结束 ===
 
             login_data = {
                 "login_name": username,
@@ -57,40 +94,38 @@ class ZJOOC:
                 "app_key": "0f4cbab4-84ee-48c3-ba4c-874578754b29",
                 "utoLoginTime": "7",
             }
-            # FIXME 这里并没有做异常处理 一般情况下你账号密码正确 没有什么问题 可能验证码错误重试即可。
+
             try:
                 login_res = self.session.post(
                     "https://centro.zjlll.net/login/doLogin", data=login_data
                 ).json()
             except Exception as ex:
                 pprint(ex)
-                print("Login failed.")
-                break
+                print("登录请求异常，程序退出。")
+                return
 
             if login_res.get("resultCode", 1) == 0:
+                print("验证码正确，登录成功！")
                 break
             else:
+                print("验证码错误或账号密码有误，正在重新获取验证码...")
                 continue
 
+        # 第二次跳转完成自动登录
         login_param = {
-            # 'time': 'm6kxkKnDKxj7kP6yziFQiB8JcAXrsBC41646796129000',
-            # time 可以不传 是一个时间戳加密后的数据
             "auth_code": login_res.get("authorization_code", ""),
             "autoLoginTime": "7",
         }
         self.session.get("https://www.zjooc.cn/autoLogin", params=login_param)
         print("Login success.")
-        # # dict_from_cookiejar 把cookies 对象 转换为python dict
-        # self._cookies = requests.utils.dict_from_cookiejar(login_res.cookies)
 
     @property
     def infomsg(self) -> dict:
         params = {"service": "/centro/api/user/getProfile", "params[withDetail]": True}
         info_data = self.session.get(
             "https://www.zjooc.cn/ajax", params=params, headers=Headers
-        ).json()
+        ).json()["data"]
 
-        info_data = info_data["data"]
         course_msg_dict = {
             "name": info_data["name"],
             "corpName": info_data["corpName"],
@@ -126,7 +161,6 @@ class ZJOOC:
             for i in range(len(course_msg_data))
         ]
 
-        # 获取课程id对应的batchid
         self._batch_dict = {
             course_msg_data[i]["id"]: course_msg_data[i]["batchId"]
             for i in range(len(course_msg_data))
@@ -135,11 +169,6 @@ class ZJOOC:
         return course_lst
 
     def _get_msg(self, modes: str | int) -> list:
-        """
-        :param mode: 0-测验 1-考试 2-作业
-        :return:  [{}]
-        """
-        # assert modes in (0, 1, 2)
         modes = str(modes)
         msg_lst: list = []
         for mode in modes:
@@ -223,7 +252,6 @@ class ZJOOC:
         return score_lst
 
     def get_video_msg(self, course_id) -> list:
-        video_msg: list
         params = {
             "params[pageNo]": 1,
             "params[courseId]": course_id,
@@ -250,16 +278,6 @@ class ZJOOC:
         return video_msg
 
     def do_video(self, course_id):
-        """
-        This function performs a video operation for a given course ID.
-
-        Parameters:
-            course_id (int): The ID of the course for which the video operation is performed.
-
-        Returns:
-            None
-        """
-        # 手动填入要做的video 的 courseid
         if not course_id:
             return
 
@@ -293,25 +311,14 @@ class ZJOOC:
             progress = idx / video_cnt
             print(
                 "\r",
-                video["Name"] + "is doing！" + "\r",
+                video["Name"] + " is doing！" + "\r",
                 "😎" * int(progress * 10) + ".." * (10 - int(progress * 10)),
                 f"[{progress:.0%}]",
                 end="",
             )
-        print("all done!")
+        print("\nall video done!")
 
     def get_an(self, paperId, course_id) -> dict:
-        """
-        Retrieves the answer data for a given paper ID and course ID.
-
-        Args:
-            paperId (int): The ID of the paper.
-            course_id (int): The ID of the course.
-
-        Returns:
-            dict: A dictionary containing the answer data, where the keys are the IDs of the answer data
-                and the values are the corresponding right answers.
-        """
         if not all([paperId, course_id]):
             return {}
 
@@ -320,7 +327,6 @@ class ZJOOC:
             answer_data = {
                 "service": "/tkksxt/api/student/score/scoreDetail",
                 "body": "true",
-                # FIXME 默认为 20231
                 "params[batchKey]": self._batch_dict.get(course_id, 20231),
                 "params[paperId]": paperId,
                 "params[courseId]": course_id,
@@ -350,15 +356,13 @@ class ZJOOC:
         if not all([paper_id, course_id, class_id]):
             return
 
-        # 获取题目答案
         paper_an_data = self.get_an(paper_id, course_id)
-        # 申请答题
         answesparams = {
             "service": "/tkksxt/api/admin/paper/getPaperInfo",
             "params[paperId]": paper_id,
             "params[courseId]": course_id,
             "params[classId]": class_id,
-            "params[batchKey]": self._batch_dict[course_id],
+            "params[batchKey]": self._batch_dict.get(course_id),
         }
         paper_data = self.session.get(
             "https://www.zjooc.cn/ajax",
@@ -369,36 +373,31 @@ class ZJOOC:
         send_data = {
             "service": "/tkksxt/api/student/score/sendSubmitAnswer",
             "body": "true",
-            "params[batchKey]": self._batch_dict[course_id],
+            "params[batchKey]": self._batch_dict.get(course_id),
             "params[id]": paper_data["id"],
             "params[stuId]": paper_data["stuId"],
             "params[clazzId]": paper_data["paperSubjectList"],
             "params[scoreId]": paper_data["scoreId"],
             **{
-                f"params[paperSubjectList][{idx}][id]": subject["id"]
+                f"params[paperSubjectList][{idx}][{k}]": v
                 for idx, subject in enumerate(paper_data["paperSubjectList"])
                 for k, v in {
                     "id": subject["id"],
                     "subjectType": subject["subjectType"],
-                    "answer": paper_an_data[subject["id"]],
+                    "answer": paper_an_data.get(subject["id"], ""),
                 }.items()
             },
         }
         try:
             res = self.session.post(
                 "https://www.zjooc.cn/ajax", data=send_data, headers=Headers
-            ).content.decode("utf-8")
-            res.raise_for_status
-        except requests.RequestException:
-            print("Failed to send data!!")
+            )
+            res.raise_for_status()
+            print("提交答案成功")
+        except requests.RequestException as e:
+            print("Failed to send data!!", e)
 
-    
-    
     def do_ans(self):
-        """
-        # FIX 谨慎使用！！！
-        """
-    
         messages_lst = [self.exammsg, self.hwmsg, self.quizemsg]
         paper_cnt = sum(len(msg) for msg in messages_lst)
         for idx, msg in enumerate(chain(*messages_lst)):
@@ -408,9 +407,11 @@ class ZJOOC:
                     course_id=msg["courseId"],
                     class_id=msg["classId"],
                 )
-                progress = idx / paper_cnt
+                progress = (idx + 1) / paper_cnt
                 progress_bar = f"{'😎' * int(progress * 10)}{'--' * (10 - int(progress * 10))}[{progress:.0%}]"
                 print("\r", progress_bar, end="")
+        print("\nAll done!")
+
     def paser(self, commands: str):
         command_list = commands.split()
 
@@ -421,15 +422,6 @@ class ZJOOC:
         try:
             match command_list[0]:
                 case "msg":
-                    """
-                    0-测验 1-考试 2-作业
-                    3-info 4-course 5-score
-                    6-video 7-an
-                    ex:
-                        msg 0
-                        msg 6 course_id
-                        msg 7 paperId course_id
-                    """
                     match command_list[1]:
                         case "0" | "1" | "2":
                             pprint(self._get_msg(command_list[1]))
@@ -445,31 +437,34 @@ class ZJOOC:
                             else:
                                 pprint(self.get_video_msg(command_list[2]))
                         case "7":
-                            self.get_an(command_list[2], command_list[3])
+                            if len(command_list) < 4:
+                                error_msg()
+                            else:
+                                self.get_an(command_list[2], command_list[3])
+                        case _:
+                            error_msg()
                 case "do":
-                    """
-                    0-测验、考试、作业 1-video 2-all[not suggest!!!]
-                    ex：
-                        do 0 paper_id course_id class_id
-                        do 1 course_id
-                        do 2 #FIX 谨慎使用！！！
-                    """
                     match command_list[1]:
                         case "0":
-                            self.do_an(
-                                paper_id=command_list[2],
-                                course_id=command_list[3],
-                                class_id=command_list[4],
-                            )
+                            if len(command_list) < 5:
+                                error_msg()
+                            else:
+                                self.do_an(
+                                    paper_id=command_list[2],
+                                    course_id=command_list[3],
+                                    class_id=command_list[4],
+                                )
                         case "1":
-                            self.do_video(command_list[2])
+                            if len(command_list) < 3:
+                                error_msg()
+                            else:
+                                self.do_video(command_list[2])
                         case "2":
                             self.do_ans()
-
+                        case _:
+                            error_msg()
                 case _:
                     error_msg()
-                    return
         except Exception as ex:
             error_msg()
             print(ex)
-            return
