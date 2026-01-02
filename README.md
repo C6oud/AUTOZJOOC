@@ -4,7 +4,7 @@
 
 使用方法：
 
-新建一个python文件 安装以下操作
+在ZJOOC.py的同目录下新建一个python文件，安装以下操作（请先行填入自己的账号和密码）
 
 ```python
 from zjooc import ZJOOC
@@ -46,6 +46,8 @@ if __name__ == "__main__":
                 os.system("cls")
 
             print(HELP_TEXT)
+        else:
+            user.paser(commands)
         else:
             user.paser(commands)
 ```
